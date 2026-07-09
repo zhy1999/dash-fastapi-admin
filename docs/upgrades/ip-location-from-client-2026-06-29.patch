@@ -1,0 +1,327 @@
+diff --git a/dash-fastapi-backend/module_admin/annotation/log_annotation.py b/dash-fastapi-backend/module_admin/annotation/log_annotation.py
+index 1b36c86..546e6ac 100644
+--- a/dash-fastapi-backend/module_admin/annotation/log_annotation.py
++++ b/dash-fastapi-backend/module_admin/annotation/log_annotation.py
+@@ -3,11 +3,13 @@ import json
+ import os
+ import requests
+ import time
++import re
+ from datetime import datetime
+ from fastapi import Request
+ from fastapi.responses import JSONResponse, ORJSONResponse, UJSONResponse
+ from functools import lru_cache, wraps
+ from typing import Literal, Optional
++from urllib.parse import unquote
+ from user_agents import parse
+ from module_admin.entity.vo.log_vo import LogininforModel, OperLogModel
+ from module_admin.service.log_service import LoginLogService, OperationLogService
+@@ -75,7 +77,9 @@ class Log:
+             )
+             oper_location = '内网IP'
+             if AppConfig.app_ip_location_query:
+-                oper_location = get_ip_location(oper_ip)
++                # 从访问头中获取访问地址（前端 JS 定位结果）
++                login_location = request.headers.get('X-Login-Location')
++                oper_location = get_ip_location(oper_ip, login_location)
+             # 根据不同的请求类型使用不同的方法获取请求参数
+             content_type = request.headers.get('Content-Type')
+             if content_type and (
+@@ -204,24 +208,89 @@ class Log:
+         return wrapper
+ 
+ 
++# === 2026-06-29 改造：从客户端 X-Login-Location 头读取归属地 ===
++# 用 LRU OrderedDict 缓存，max=4096 条，超出按 LRU 淘汰
++from collections import OrderedDict
++
++_ip_cache = OrderedDict()
++_IP_CACHE_MAX = 4096
++_LOCATION_MAX_LEN = 64
++
++
++def _sanitize_location(raw: str) -> str:
++    """
++    清洗客户端传入的归属地字符串：
++    - URL 解码（处理前端 encodeURIComponent 的情况）
++    - 去前后空白
++    - 去除 XSS 风险字符（尖括号、引号、反引号、中文方括号）
++    - 去除控制字符
++    - 长度截断
++    """
++    if not raw:
++        return ''
++    s = unquote(raw).strip()
++    # 用集合 + ord 过滤，避免在源码里直接写特殊 Unicode 字符
++    _BAD_CHARS = {'<', '>', chr(34), chr(39), chr(96), chr(0x3010), chr(0x3011)}
++    s = ''.join(c for c in s if c not in _BAD_CHARS and ord(c) >= 0x20)
++    return s[:_LOCATION_MAX_LEN]
++
++
++def get_ip_location(oper_ip: str, defaut_location: str = '') -> str:
++    """
++    解析 IP 归属地（客户端驱动 + LRU 缓存）
++
++    :param oper_ip: 操作 IP
++    :param defaut_location: 客户端从 X-Login-Location 头传入的归属地
++    :return: 归属地字符串
++    """
++    # oper_ip 为空 / None → 直接未知
++    if not oper_ip:
++        return '未知'
++
++    # 1. 缓存命中
++    if oper_ip in _ip_cache:
++        _ip_cache.move_to_end(oper_ip)
++        return _ip_cache[oper_ip]
++
++    # 2. 内网地址
++    if oper_ip in ('127.0.0.1', 'localhost', '::1'):
++        value = '内网IP'
++    # 3. 客户端传入地址（解码 + sanitize）
++    elif defaut_location:
++        cleaned = _sanitize_location(defaut_location)
++        value = cleaned if cleaned else '未知'
++    # 4. 兜底
++    else:
++        value = '未知'
++
++    # 5. 写入缓存，LRU 淘汰最久未访问的条目
++    _ip_cache[oper_ip] = value
++    _ip_cache.move_to_end(oper_ip)
++    while len(_ip_cache) > _IP_CACHE_MAX:
++        _ip_cache.popitem(last=False)
++    return value
++
++
+ @lru_cache()
+-def get_ip_location(oper_ip: str):
++def get_ip_location2(oper_ip: str) -> str:
+     """
+-    查询ip归属区域
++    旧版 IP 归属地查询（通过百度 qifu-api）
+ 
+-    :param oper_ip: 需要查询的ip
+-    :return: ip归属区域
++    保留此函数作为兜底/对比实现。当前默认走客户端 header 模式，
++    如需切换到服务端 API 查询，可在调用处改用本函数。
+     """
+     oper_location = '内网IP'
+     try:
+         if oper_ip != '127.0.0.1' and oper_ip != 'localhost':
+             oper_location = '未知'
+-            ip_result = requests.get(f'https://qifu-api.baidubce.com/ip/geo/v1/district?ip={oper_ip}')
++            ip_result = requests.get(
++                'https://qifu-api.baidubce.com/ip/geo/v1/district?ip=' + oper_ip
++            )
+             if ip_result.status_code == 200:
+                 prov = ip_result.json().get('data').get('prov')
+                 city = ip_result.json().get('data').get('city')
+                 if prov or city:
+-                    oper_location = f'{prov}-{city}'
++                    oper_location = prov + '-' + city
+     except Exception as e:
+         oper_location = '未知'
+         print(e)
+diff --git a/dash-fastapi-frontend/assets/js/login_location.js b/dash-fastapi-frontend/assets/js/login_location.js
+new file mode 100644
+index 0000000..f34109b
+--- /dev/null
++++ b/dash-fastapi-frontend/assets/js/login_location.js
+@@ -0,0 +1,179 @@
++/**
++ * 自动获取登录地点并注入到所有出站请求的 X-Login-Location header
++ *
++ * 加载时机：Dash 启动时自动加载 assets/js/login_location.js（按文件名排序）
++ *
++ * 数据源（按优先级串行降级）：
++ *   1. 浏览器 navigator.geolocation + Nominatim 反向地理编码（最准，需用户授权）
++ *   2. ipwho.is 国际 IP 库（CORS 友好）
++ *   3. 搜狐 IP API（pv.sohu.com/cityjson，国内友好）
++ *   4. 失败时：什么都不发，后端按"未知"处理
++ *
++ * 缓存策略：sessionStorage，会话内只请求一次
++ *
++ * 注入策略：
++ *   - 拦截 window.fetch，给每个请求加 X-Login-Location header
++ *   - 拦截 XMLHttpRequest.prototype.send，同上（兼容老浏览器和部分 Dash 内部请求）
++ */
++(function () {
++    'use strict';
++
++    var STORAGE_KEY = 'dash_login_location';
++    var HEADER_NAME = 'X-Login-Location';
++    var TIMEOUT_MS = 3000;
++
++    function safeGetStorage() {
++        try {
++            return sessionStorage.getItem(STORAGE_KEY) || '';
++        } catch (e) {
++            return '';
++        }
++    }
++
++    function safeSetStorage(value) {
++        try {
++            sessionStorage.setItem(STORAGE_KEY, value);
++        } catch (e) { /* sessionStorage 不可用，静默失败 */ }
++    }
++
++    function fetchWithTimeout(url, timeoutMs) {
++        return new Promise(function (resolve, reject) {
++            var timer = setTimeout(function () {
++                reject(new Error('timeout'));
++            }, timeoutMs);
++            fetch(url, { headers: { 'Accept': 'application/json' } })
++                .then(function (r) {
++                    clearTimeout(timer);
++                    if (!r.ok) {
++                        reject(new Error('http ' + r.status));
++                        return null;
++                    }
++                    return r.json();
++                })
++                .then(
++                    function (data) { resolve(data); },
++                    function (err) { clearTimeout(timer); reject(err); }
++                );
++        });
++    }
++
++    // 1. 浏览器地理位置 + Nominatim 反向地理编码
++    function tryBrowserGeolocation() {
++        return new Promise(function (resolve, reject) {
++            if (!navigator.geolocation) {
++                reject(new Error('no geolocation api'));
++                return;
++            }
++            navigator.geolocation.getCurrentPosition(
++                function (pos) {
++                    var lat = pos.coords.latitude;
++                    var lon = pos.coords.longitude;
++                    fetchWithTimeout(
++                        'https://nominatim.openstreetmap.org/reverse?format=json&lat=' +
++                            lat + '&lon=' + lon + '&accept-language=zh-CN&zoom=10',
++                        TIMEOUT_MS
++                    ).then(function (data) {
++                        var name = (data && data.address) ?
++                            [data.address.country, data.address.state, data.address.city || data.address.town || data.address.county]
++                                .filter(Boolean).join(' ')
++                            : '';
++                        resolve(name || (lat.toFixed(2) + ',' + lon.toFixed(2)));
++                    }).catch(function () {
++                        resolve(lat.toFixed(2) + ',' + lon.toFixed(2));
++                    });
++                },
++                function (err) { reject(new Error('geo: ' + (err && err.message || 'denied'))); },
++                { timeout: TIMEOUT_MS, maximumAge: 86400000 }
++            );
++        });
++    }
++
++    // 2. ipwho.is 国际 IP 库
++    function tryIpWhoIs() {
++        return fetchWithTimeout('https://ipwho.is/', TIMEOUT_MS)
++            .then(function (data) {
++                if (!data || data.success === false) throw new Error('ipwho failed');
++                var parts = [data.country, data.region, data.city].filter(Boolean);
++                if (!parts.length) throw new Error('no city');
++                return parts.join(' ');
++            });
++    }
++
++    // 3. 搜狐 IP API（国内友好）
++    function trySohuIp() {
++        return new Promise(function (resolve, reject) {
++            var cb = '__dash_login_loc_cb_' + Date.now();
++            var timer = setTimeout(function () {
++                delete window[cb];
++                reject(new Error('sohu timeout'));
++            }, TIMEOUT_MS);
++            window[cb] = function (data) {
++                clearTimeout(timer);
++                delete window[cb];
++                try {
++                    if (data && data.cname) resolve(data.cname);
++                    else reject(new Error('sohu no data'));
++                } catch (e) { reject(e); }
++            };
++            var s = document.createElement('script');
++            s.src = 'https://pv.sohu.com/cityjson?ie=utf-8&fn=' + cb;
++            s.onerror = function () {
++                clearTimeout(timer);
++                delete window[cb];
++                reject(new Error('sohu script failed'));
++            };
++            document.head.appendChild(s);
++        });
++    }
++
++    function detectLocation() {
++        // 串行降级
++        return tryBrowserGeolocation()
++            .catch(function () { return tryIpWhoIs(); })
++            .catch(function () { return trySohuIp(); });
++    }
++
++    // 后台启动检测，不阻塞页面
++    if (!safeGetStorage()) {
++        detectLocation()
++            .then(function (loc) {
++                if (loc) {
++                    safeSetStorage(String(loc).slice(0, 64));
++                    if (window.console && console.log) console.log('[login-location]', loc);
++                }
++            })
++            .catch(function (err) {
++                if (window.console && console.warn) console.warn('[login-location] detect failed:', err && err.message);
++            });
++    }
++
++    // === 拦截 fetch ===
++    var origFetch = window.fetch;
++    window.fetch = function (input, init) {
++        init = init || {};
++        var loc = safeGetStorage();
++        if (loc) {
++            if (init.headers instanceof Headers) {
++                if (!init.headers.has(HEADER_NAME)) init.headers.set(HEADER_NAME, loc);
++            } else if (Array.isArray(init.headers)) {
++                var has = init.headers.some(function (h) { return h[0] === HEADER_NAME; });
++                if (!has) init.headers.push([HEADER_NAME, loc]);
++            } else {
++                init.headers = init.headers || {};
++                if (!(HEADER_NAME in init.headers)) init.headers[HEADER_NAME] = loc;
++            }
++        }
++        return origFetch.call(this, input, init);
++    };
++
++    // === 拦截 XMLHttpRequest.send ===
++    // Dash 2.x 主要用 fetch，但部分组件（如 ECharts、上传组件）仍走 XHR
++    var origSend = XMLHttpRequest.prototype.send;
++    XMLHttpRequest.prototype.send = function (body) {
++        var loc = safeGetStorage();
++        if (loc) {
++            try { this.setRequestHeader(HEADER_NAME, loc); } catch (e) { /* 忽略 */ }
++        }
++        return origSend.call(this, body);
++    };
++})();
+diff --git a/dash-fastapi-frontend/utils/request.py b/dash-fastapi-frontend/utils/request.py
+index 684c209..c04ebf1 100644
+--- a/dash-fastapi-frontend/utils/request.py
++++ b/dash-fastapi-frontend/utils/request.py
+@@ -63,6 +63,12 @@ def api_request(
+             'is_browser': 'no',
+         }
+     )
++    # === 2026-06-29 转发客户端登录地点（来自 assets/js/login_location.js） ===
++    # 浏览器 JS 拦截 fetch/XHR，给每个出站请求注入 X-Login-Location
++    # 此处原样转发到后端 FastAPI
++    login_location = (request.headers.get('X-Login-Location') or '').strip()
++    if login_location:
++        api_headers['X-Login-Location'] = login_location
+     if is_token:
+         api_headers.update({'Authorization': 'Bearer ' + authorization})
+     if api_method == 'get':

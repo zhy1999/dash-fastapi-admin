@@ -1,0 +1,128 @@
+"""
+嵌入式自动登录端点
+
+URL 形式：
+  GET /auto-login?username=xxx&password=yyy&redirect=/system/user
+  GET /auto-login?token=xxx&redirect=/system/user
+
+⚠️ 安全提示：
+  - 这是免登录端点，等于把用户名密码写在 URL 里
+  - 仅用于内部网络 / 受信任的嵌入式嵌入场景
+  - 生产环境建议加白名单 IP / HMAC 签名 / 一次性 token 二次确认
+  - redirect 路径必须在白名单内（防 open redirect）
+
+调用示例：
+  http://10.208.11.16:38039/auto-login?username=admin&password=admin123&redirect=/system/user
+"""
+from urllib.parse import urlparse
+
+from flask import redirect, request, session
+
+from api.login import LoginApi
+from config.exception import (
+    AuthException,
+    RequestException,
+    ServiceException,
+    ServiceWarning,
+)
+from server import server
+from utils.log_util import logger
+
+
+# 允许自动跳转的白名单路径前缀（防 open redirect）
+ALLOWED_REDIRECT_PREFIXES = (
+    '/system/',
+    '/monitor/',
+    '/tool/',
+    '/',
+)
+
+
+def _safe_redirect(path):
+    """
+    校验 redirect 路径是否合法
+    - 必须以 / 开头（相对路径）
+    - 拒绝 //evil.com、http://、https:// 等外部跳转
+    - 必须以白名单前缀开头
+    """
+    if not path or not isinstance(path, str):
+        return '/system/user'
+    parsed = urlparse(path)
+    # 拒绝带 scheme 或 netloc 的 URL（防 open redirect）
+    if parsed.scheme or parsed.netloc:
+        return '/system/user'
+    # 必须以白名单前缀开头
+    if not any(path.startswith(p) for p in ALLOWED_REDIRECT_PREFIXES):
+        return '/system/user'
+    return path
+
+
+def _login_error_redirect(msg):
+    """统一错误跳转"""
+    from urllib.parse import quote
+    return redirect('/login?error=' + quote(str(msg or '登录失败')))
+
+
+@server.route('/auto-login', methods=['GET'])
+def auto_login():
+    """
+    嵌入式自动登录路由
+    """
+    username = request.args.get('username')
+    password = request.args.get('password')
+    token = request.args.get('token')
+    redirect_path = _safe_redirect(
+        request.args.get('redirect', '/system/user')
+    )
+
+    try:
+        if token:
+            # 已有 token，直接 set session
+            session['Authorization'] = token
+            session['is_auto_login'] = True
+            logger.info(
+                '[auto-login] token 方式登录, redirect={}', redirect_path
+            )
+        elif username and password:
+            # 用用户名密码调后端登录拿 token
+            try:
+                result = LoginApi.login(
+                    dict(username=username, password=password)
+                )
+            except AuthException as e:
+                return _login_error_redirect(
+                    e.message or '认证失败，token 无效或过期'
+                )
+            except ServiceException as e:
+                # 后端业务错误（密码错、账号不存在、账号锁定等）
+                return _login_error_redirect(
+                    e.message or '登录失败，请检查用户名密码'
+                )
+            except ServiceWarning as e:
+                return _login_error_redirect(e.message or '登录警告')
+            except RequestException as e:
+                return _login_error_redirect(
+                    e.message or '请求异常，请稍后重试'
+                )
+
+            # 拿到 token
+            if isinstance(result, dict):
+                token = result.get('token')
+                if not token:
+                    return _login_error_redirect('登录失败：未拿到 token')
+                session['Authorization'] = token
+                session['is_auto_login'] = True
+                logger.info(
+                    '[auto-login] 用户 {} 登录成功, redirect={}',
+                    username,
+                    redirect_path,
+                )
+            else:
+                return _login_error_redirect('登录失败：响应格式异常')
+        else:
+            return _login_error_redirect('缺少 username/password 或 token 参数')
+    except Exception as e:
+        logger.error('[auto-login] 未捕获异常: {}', str(e))
+        return _login_error_redirect('登录异常，请联系管理员')
+
+    return redirect(redirect_path)

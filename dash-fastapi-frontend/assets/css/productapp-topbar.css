@@ -1,0 +1,215 @@
+/* ProductApp 风格顶栏 —— 仿转龙湾煤矿心理安全监测系统原项目 */
+
+/* 顶栏容器强制 100% 宽（AntdRow 是 flex 容器，子 div 默认按内容宽） */
+#productapp-topbar-container {
+    width: 100%;
+    flex: 0 0 100%;
+    max-width: 100%;
+}
+/* 在现有顶栏（head）上方独立一行 */
+
+.productapp-header {
+    height: 90px;
+    background: linear-gradient(to top, #061633 0%, #00134A 50%, #030638 100%);
+    border-bottom: 1px solid #16537e;
+    display: grid;
+    grid-template-columns: 1fr 3fr 1fr;
+    align-items: center;
+    padding: 0 20px;
+    flex-wrap: nowrap;
+    box-sizing: border-box;
+    width: 100%;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* ===== 左 nav：logo + 登录人 ===== */
+.productapp-left-nav {
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    gap: 10px;
+}
+.productapp-left-nav .logo-img {
+    width: 36px;
+    height: 36px;
+    object-fit: contain;
+}
+.productapp-left-nav .login-txt {
+    color: #01BFFF;
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+/* ===== 中 nav：左菜单 + 标题 + 右菜单 ===== */
+.productapp-center-nav {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 0;
+}
+.productapp-center-nav .left-menus {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    margin-right: 10px;
+    gap: 4px;
+}
+.productapp-center-nav .right-menus {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    margin-left: 10px;
+    gap: 4px;
+}
+
+/* ===== 右 nav：全屏 + 退出图标 ===== */
+
+/* 全屏 / 退出 图标按钮 */
+.productapp-right-nav .productapp-icon-btn {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    margin: 0 8px;
+    padding: 4px;
+    transition: opacity 0.2s;
+}
+.productapp-right-nav .productapp-icon-btn:hover {
+    opacity: 0.7;
+}
+.productapp-right-nav .productapp-icon-img {
+    width: 24px;
+    height: 24px;
+    object-fit: contain;
+}
+
+/* 退出登录按钮：图标 + 文字组合 */
+.signout-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 1px solid #16537e;
+    color: #01BFFF;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background 0.2s, border-color 0.2s;
+}
+.signout-btn:hover {
+    background: rgba(1, 191, 255, 0.1);
+    border-color: #01BFFF;
+}
+.signout-btn .productapp-icon-img {
+    width: 18px;
+    height: 18px;
+}
+
+.productapp-right-nav {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    white-space: nowrap;
+    gap: 12px;
+}
+.productapp-right-nav i {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+.productapp-right-nav i:hover {
+    background: rgba(36, 136, 255, 0.15);
+}
+.productapp-right-nav i img {
+    width: 20px;
+    height: 20px;
+}
+.productapp-right-nav .signout-btn {
+    background: transparent;
+    border: 1px solid #2488ff;
+    color: #60a5fa;
+    padding: 4px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+.productapp-right-nav .signout-btn:hover {
+    background: #2488ff;
+    color: #fff;
+}
+
+/* ===== 菜单项（dcc.Link + a 标签）===== */
+.productapp-nav-item {
+    color: #01BFFF;
+    font-size: 1.2rem;
+    font-weight: 500;
+    padding: 8px 18px;
+    text-decoration: none !important;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    border-radius: 4px;
+}
+a.productapp-nav-item:hover,
+.productapp-nav-item.mouseOver:hover {
+    color: #ffffff;
+    background: rgba(36, 136, 255, 0.1);
+}
+.productapp-nav-item.active {
+    color: #ffffff;
+    font-size: 1.35rem;
+    font-weight: bold;
+    background: rgba(36, 136, 255, 0.18);
+}
+.productapp-nav-item.active::after {
+    content: "";
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 4px;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #01BFFF, transparent);
+    box-shadow: 0 0 8px #01BFFF;
+}
+
+/* ===== 标题（斜切六边形 + 渐变文字）===== */
+.productapp-header-title {
+    justify-self: center;
+    align-self: center;
+    text-align: center;
+    font-size: 1.7rem !important;
+    font-weight: bold;
+    color: #e0e7ed;
+    background: linear-gradient(to top, #0d2e47 0%, #0b324f 70%, #095686 100%);
+    clip-path: polygon(0% 0%, 100% 0%, 95% 100%, 5% 100%);
+    padding: 8px 28px;
+    overflow: hidden;
+    width: auto;
+    min-width: 360px;
+    max-width: 620px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+}
+.productapp-header-title-text {
+    font-family: "Heiti SC", "Heiti TC", "SimHei", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(
+        to right,
+        #228BDC 0%,
+        #5FA5BA 50%,
+        #C2CF9B 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 12px rgba(64, 169, 255, 0.4);
+}

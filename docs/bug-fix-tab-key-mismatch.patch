@@ -1,0 +1,76 @@
+--- dash-fastapi-frontend/callbacks/layout_c/index_c.py.bak.fix	2026-06-25 09:13:27.091371773 +0000
++++ dash-fastapi-frontend/callbacks/layout_c/index_c.py	2026-06-25 09:13:40.507388951 +0000
+@@ -83,9 +83,30 @@
+     if trigger_id == 'index-side-menu':
+         breadcrumb_items = build_breadcrumb(currentItem, currentItemPath)
+ 
+-        # tab 已存在则只切换
+-        if currentKey in [item['key'] for item in origin_items]:
+-            return [dash.no_update, currentKey, breadcrumb_items, currentKeyPath or []]
++        # 统一 tab key 格式：优先用 href（pathname），保证 init_first_tab 和这里一致
++        menu_href = (currentItem.get('props', {}) or {}).get('href') or ''
++        if menu_href and not menu_href.startswith('/'):
++            menu_href = '/' + menu_href
++        tab_key = menu_href or currentKey
++
++        # lenient 匹配：tab 已存在则只切换（key 完全匹配 或 href 匹配）
++        def _tab_exists(items, target_key):
++            for it in items:
++                if it.get('key') == target_key:
++                    return True
++                # 兜底：用 children 里 href 末尾做匹配
++                children = it.get('children') or []
++                if not isinstance(children, list):
++                    children = [children]
++                for ch in children:
++                    if isinstance(ch, dict):
++                        href = (ch.get('props', {}) or {}).get('href', '')
++                        if href and target_key.endswith(href):
++                            return True
++            return False
++
++        if _tab_exists(origin_items, tab_key):
++            return [dash.no_update, tab_key, breadcrumb_items, currentKeyPath or []]
+ 
+         menu_title = currentItem.get('props', {}).get('title', '未命名')
+         menu_modules = currentItem.get('props', {}).get('modules')
+@@ -116,7 +137,7 @@
+         if menu_modules:
+             new_items.append({
+                 'label': menu_title,
+-                'key': currentKey,
++                'key': tab_key,
+                 'closable': currentItem.get('props', {}).get('affix', False) != True,
+                 'children': import_module('views.' + menu_modules).render(),
+                 'contextMenu': context_menu,
+@@ -124,7 +145,7 @@
+         else:
+             new_items.append({
+                 'label': menu_title,
+-                'key': currentKey,
++                'key': tab_key,
+                 'children': fac.AntdResult(
+                     status='404', title='页面不存在', subTitle='请先配置该路由的页面',
+                     style={'paddingBottom': 0, 'paddingTop': 0},
+@@ -132,7 +153,7 @@
+                 'contextMenu': context_menu,
+             })
+ 
+-        return [new_items, currentKey, breadcrumb_items, currentKeyPath or []]
++        return [new_items, tab_key, breadcrumb_items, currentKeyPath or []]
+ 
+     elif trigger_id == 'tabs-container':
+         # 删除指定 tab
+@@ -334,7 +355,11 @@
+     breadcrumb_items = build_breadcrumb(currentItem, currentItemPath)
+     menu_title = currentItem.get('props', {}).get('title', '未命名')
+     menu_modules = currentItem.get('props', {}).get('modules')
+-    currentKey = currentItem.get('props', {}).get('key')
++    # 统一用 href 作为 tab key（与 handle_tab_switch_and_create 一致，避免重复创建）
++    menu_href = (currentItem.get('props', {}) or {}).get('href') or ''
++    if menu_href and not menu_href.startswith('/'):
++        menu_href = '/' + menu_href
++    currentKey = menu_href or currentItem.get('props', {}).get('key')
+ 
+     context_menu = [
+         {'key': '刷新页面', 'label': '刷新页面', 'icon': 'antd-reload'},

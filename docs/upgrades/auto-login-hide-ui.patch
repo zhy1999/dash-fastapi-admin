@@ -1,0 +1,515 @@
+diff --git a/dash-fastapi-frontend/auto_login.py b/dash-fastapi-frontend/auto_login.py
+--- a/dash-fastapi-frontend/auto_login.py
++++ b/dash-fastapi-frontend/auto_login.py
+@@ -78,6 +78,7 @@
+             # 已有 token，直接 set session
+             session['Authorization'] = token
++            session['is_auto_login'] = True
+             logger.info(
+                 '[auto-login] token 方式登录, redirect={}', redirect_path
+             )
+@@ -110,6 +110,7 @@
+                 if not token:
+                     return _login_error_redirect('登录失败：未拿到 token')
+                 session['Authorization'] = token
++                session['is_auto_login'] = True
+                 logger.info(
+                     '[auto-login] 用户 {} 登录成功, redirect={}',
+                     username,
+
+diff --git a/dash-fastapi-frontend/views/layout/__init__.py b/dash-fastapi-frontend/views/layout/__init__.py
+index cfc811c..332d4ea 100644
+--- a/dash-fastapi-frontend/views/layout/__init__.py
++++ b/dash-fastapi-frontend/views/layout/__init__.py
+@@ -2,13 +2,14 @@ import feffery_antd_components as fac
+ import feffery_utils_components as fuc
+ from dash import html
+ from callbacks.layout_c import fold_side_menu  # noqa: F401
+-from callbacks.layout_c import index_c  # noqa: F401
++from callbacks.layout_c import index_c, productapp_topbar_c  # noqa: F401
+ from views.layout.components.aside import render_aside_content
+ from views.layout.components.content import render_main_content
+ from views.layout.components.head import render_head_content
++from views.layout.components.productapp_topbar import render_productapp_topbar
+ 
+ 
+-def render(menu_info):
++def render(menu_info, current_path="/dashboard", is_auto_login=False):
+     return fuc.FefferyTopProgress(
+         html.Div(
+             [
+@@ -83,6 +84,15 @@ def render(menu_info):
+                     renderFooter=True,
+                     centered=True,
+                 ),
++                # ProductApp 风格顶栏（横跨整个页面顶部）
++                fac.AntdRow(
++                    render_productapp_topbar(current_path),
++                    style={
++                        'position': 'sticky',
++                        'top': 0,
++                        'zIndex': 1000,
++                    },
++                ),
+                 # 平台主页面
+                 fac.AntdRow(
+                     [
+@@ -90,7 +100,7 @@ def render(menu_info):
+                         fac.AntdCol(
+                             fac.AntdAffix(
+                                 html.Div(
+-                                    render_aside_content(menu_info),
++                                    render_aside_content(menu_info, is_auto_login=is_auto_login),
+                                     id='side-menu',
+                                     style={
+                                         'height': '100vh',
+@@ -108,14 +118,14 @@ def render(menu_info):
+                         fac.AntdCol(
+                             [
+                                 fac.AntdRow(
+-                                    render_head_content(),
++                                    render_head_content(is_auto_login=is_auto_login),
+                                     style={
+                                         'height': '50px',
+                                         'boxShadow': 'rgb(240 241 242) 0px 2px 14px',
+                                         'background': 'white',
+                                         'marginBottom': '10px',
+                                         'position': 'sticky',
+-                                        'top': 0,
++                                        'top': '90px',
+                                         'zIndex': 999,
+                                     },
+                                 ),
+
+diff --git a/dash-fastapi-frontend/views/layout/components/aside.py b/dash-fastapi-frontend/views/layout/components/aside.py
+index eb1f2f1..08e0b97 100644
+--- a/dash-fastapi-frontend/views/layout/components/aside.py
++++ b/dash-fastapi-frontend/views/layout/components/aside.py
+@@ -1,60 +1,78 @@
+ import feffery_antd_components as fac
+-from dash import dcc, get_asset_url
++from dash import dcc, get_asset_url, html
+ from callbacks.layout_c import aside_c  # noqa: F401
+ from config.env import AppConfig
+ 
+ 
+-def render_aside_content(menu_info):
++def render_aside_content(menu_info, is_auto_login=False):
++    """
++    渲染左侧菜单区域
++    :param is_auto_login: 是否为 auto-login 场景，True 时隐藏 logo 和 title
++    """
++    if is_auto_login:
++        # auto-login 场景：保留 50px 高度的暗色占位，避免菜单紧贴页面顶部
++        header = html.Div(
++            style={
++                'height': '50px',
++                'background': '#001529',
++                'position': 'sticky',
++                'top': 0,
++                'zIndex': 999,
++            }
++        )
++    else:
++        header = fac.AntdRow(
++            [
++                fac.AntdCol(
++                    fac.AntdImage(
++                        width=32,
++                        height=32,
++                        src=get_asset_url('imgs/logo.png'),
++                        preview=False,
++                    ),
++                    style={
++                        'height': '100%',
++                        'display': 'flex',
++                        'alignItems': 'center',
++                        'flex': '0 0 auto',
++                    },
++                ),
++                fac.AntdCol(
++                    fac.AntdText(
++                        AppConfig.app_name,
++                        id='logo-text',
++                        style={
++                            'fontSize': '22px',
++                            'color': 'rgb(255, 255, 255)',
++                            'whiteSpace': 'nowrap',
++                        },
++                    ),
++                    style={
++                        'height': '100%',
++                        'display': 'flex',
++                        'alignItems': 'center',
++                        'marginLeft': '2px',
++                        'flex': '0 0 auto',
++                    },
++                ),
++            ],
++            style={
++                'height': '50px',
++                'background': '#001529',
++                'position': 'sticky',
++                'top': 0,
++                'zIndex': 999,
++                'paddingLeft': '18px',
++            },
++        )
++
+     return [
+         dcc.Store(id='current-key_path-store'),
+         dcc.Store(id='current-item-store'),
+         dcc.Store(id='current-item_path-store'),
+         fac.AntdSider(
+             [
+-                fac.AntdRow(
+-                    [
+-                        fac.AntdCol(
+-                            fac.AntdImage(
+-                                width=32,
+-                                height=32,
+-                                src=get_asset_url('imgs/logo.png'),
+-                                preview=False,
+-                            ),
+-                            style={
+-                                'height': '100%',
+-                                'display': 'flex',
+-                                'alignItems': 'center',
+-                                'flex': '0 0 auto',
+-                            },
+-                        ),
+-                        fac.AntdCol(
+-                            fac.AntdText(
+-                                AppConfig.app_name,
+-                                id='logo-text',
+-                                style={
+-                                    'fontSize': '22px',
+-                                    'color': 'rgb(255, 255, 255)',
+-                                    'whiteSpace': 'nowrap',
+-                                },
+-                            ),
+-                            style={
+-                                'height': '100%',
+-                                'display': 'flex',
+-                                'alignItems': 'center',
+-                                'marginLeft': '2px',
+-                                'flex': '0 0 auto',
+-                            },
+-                        ),
+-                    ],
+-                    style={
+-                        'height': '50px',
+-                        'background': '#001529',
+-                        'position': 'sticky',
+-                        'top': 0,
+-                        'zIndex': 999,
+-                        'paddingLeft': '18px',
+-                    },
+-                ),
++                header,
+                 fac.AntdMenu(
+                     id='index-side-menu',
+                     menuItems=menu_info,
+
+diff --git a/dash-fastapi-frontend/views/layout/components/head.py b/dash-fastapi-frontend/views/layout/components/head.py
+index 0dd4ead..9cd4f89 100644
+--- a/dash-fastapi-frontend/views/layout/components/head.py
++++ b/dash-fastapi-frontend/views/layout/components/head.py
+@@ -1,12 +1,12 @@
+ import feffery_antd_components as fac
+ from dash import html
+ from callbacks.layout_c import head_c  # noqa: F401
+-from config.env import ApiConfig
++from config.env import AppConfig
+ from utils.cache_util import CacheManager
+ 
+ 
+-def render_head_content():
+-    return [
++def render_head_content(is_auto_login=False):
++    cols = [
+         # 页首左侧折叠按钮区域
+         fac.AntdCol(
+             html.Div(
+@@ -33,7 +33,7 @@ def render_head_content():
+         fac.AntdCol(
+             fac.AntdBreadcrumb(
+                 items=[
+-                    
++
+                 ],
+                 id='header-breadcrumb',
+                 style={
+@@ -45,92 +45,63 @@ def render_head_content():
+             id='header-breadcrumb-col',
+             flex='21',
+         ),
+-        # 页首中部搜索区域 (已隐藏)
+-        # fac.AntdCol(
+-        #     fac.AntdParagraph(
+-        #         [
+-        #             fac.AntdText(
+-        #                 'Ctrl', keyboard=True, style={'color': '#8c8c8c'}
+-        #             ),
+-        #             fac.AntdText(
+-        #                 'K', keyboard=True, style={'color': '#8c8c8c'}
+-        #             ),
+-        #             fac.AntdText('唤出搜索面板', style={'color': '#8c8c8c'}),
+-        #         ],
+-        #         style={
+-        #             'height': '100%',
+-        #             'display': 'flex',
+-        #             'alignItems': 'center',
+-        #         },
+-        #     ),
+-        #     id='header-search-col',
+-        #     flex='6',
+-        # ),
+-        # 页首开源项目地址 (已隐藏)
+-        # fac.AntdCol(
+-        #     html.A(
+-        #         html.Img(
+-        #             src='https://gitee.com/insistence2022/dash-fastapi-admin/badge/star.svg?theme=dark'
+-        #         ),
+-        #         href='https://gitee.com/insistence2022/dash-fastapi-admin',
+-        #         target='_blank',
+-        #         style={
+-        #             'height': '100%',
+-        #             'display': 'flex',
+-        #             'alignItems': 'center',
+-        #         },
+-        #     ),
+-        #     id='header-gitee-col',
+-        #     flex='3',
+-        # ),
+-        # 页首右侧用户信息区域
+-        fac.AntdCol(
+-            fac.AntdSpace(
+-                [
+-                    fac.AntdAvatar(
+-                        id='avatar-info',
+-                        mode='image',
+-                        src=f"{ApiConfig.BaseUrl}{CacheManager.get('user_info').get('avatar')}"
+-                        if CacheManager.get('user_info').get('avatar')
+-                        else '/assets/imgs/profile.jpg',
+-                        size=36,
+-                    ),
+-                    fac.AntdDropdown(
+-                        id='index-header-dropdown',
+-                        title=CacheManager.get('user_info').get('user_name'),
+-                        arrow=True,
+-                        menuItems=[
+-                            {
+-                                'title': '个人资料',
+-                                'key': '个人资料',
+-                                'icon': 'antd-idcard',
+-                            },
+-                            {
+-                                'title': '布局设置',
+-                                'key': '布局设置',
+-                                'icon': 'antd-layout',
+-                            },
+-                            {'isDivider': True},
+-                            {
+-                                'title': '退出登录',
+-                                'key': '退出登录',
+-                                'icon': 'antd-logout',
+-                            },
+-                        ],
+-                        placement='bottomRight',
+-                    ),
+-                ],
+-                style={
+-                    'height': '100%',
+-                    'float': 'right',
+-                    'display': 'flex',
+-                    'alignItems': 'center',
+-                },
++    ]
++
++    # auto-login 场景：隐藏用户头像与用户名下拉菜单（嵌入式场景不需要这些导航操作）
++    if not is_auto_login:
++        cols.append(
++            fac.AntdCol(
++                fac.AntdSpace(
++                    [
++                        fac.AntdAvatar(
++                            id='avatar-info',
++                            mode='image',
++                            src=(
++                                f'{AppConfig.app_base_url}{CacheManager.get("user_info").get("avatar")}'
++                                if CacheManager.get('user_info') and CacheManager.get('user_info').get('avatar')
++                                else '/assets/imgs/profile.jpg'
++                            ),
++                            size=36,
++                        ),
++                        fac.AntdDropdown(
++                            id='index-header-dropdown',
++                            title=CacheManager.get('user_info').get('user_name'),
++                            arrow=True,
++                            menuItems=[
++                                {
++                                    'title': '个人资料',
++                                    'key': '个人资料',
++                                    'icon': 'antd-idcard',
++                                },
++                                {
++                                    'title': '布局设置',
++                                    'key': '布局设置',
++                                    'icon': 'antd-layout',
++                                },
++                                {'isDivider': True},
++                                {
++                                    'title': '退出登录',
++                                    'key': '退出登录',
++                                    'icon': 'antd-logout',
++                                },
++                            ],
++                            placement='bottomRight',
++                        ),
++                    ],
++                    style={
++                        'height': '100%',
++                        'float': 'right',
++                        'display': 'flex',
++                        'alignItems': 'center',
++                    },
++                ),
++                flex='3',
+             ),
+-            flex='3',
+-        ),
++        )
++
++    # 全局刷新按钮（始终保留；auto-login 时让它靠右）
++    cols.append(
+         fac.AntdCol(
+-            # 全局刷新按钮
+             html.Div(
+                 fac.AntdTooltip(
+                     fac.AntdButton(
+@@ -154,7 +125,10 @@ def render_head_content():
+                 'paddingRight': '3px',
+                 'display': 'flex',
+                 'alignItems': 'center',
++                'marginLeft': 'auto' if is_auto_login else None,
+             },
+             flex='1',
+         ),
+-    ]
++    )
++
++    return cols
+
+diff --git a/dash-fastapi-frontend/callbacks/router_c.py b/dash-fastapi-frontend/callbacks/router_c.py
+index b5119ac..c32652a 100644
+--- a/dash-fastapi-frontend/callbacks/router_c.py
++++ b/dash-fastapi-frontend/callbacks/router_c.py
+@@ -8,6 +8,7 @@ from api.router import RouterApi
+ from config.router import RouterConfig
+ from server import app
+ from utils.cache_util import CacheManager
++from utils.log_util import logger
+ from utils.router_util import RouterUtil
+ 
+ 
+@@ -19,6 +20,8 @@ from utils.router_util import RouterUtil
+         ),
+         current_pathname=Output('current-pathname-container', 'data'),
+         router_list=Output('router-list-container', 'data'),
++        # 新增：auto-login 场景下同步 server session 的 token 到前端 dcc.Store
++        token=Output('token-container', 'data', allow_duplicate=True),
+     ),
+     inputs=dict(pathname=Input('url-container', 'pathname')),
+     state=dict(
+@@ -67,10 +70,11 @@ def router(pathname, url_trigger, session_token):
+                 )
+                 # 否则正常渲染主页面
+                 return dict(
+-                    app_mount=views.layout.render(user_menu_info),
++                    app_mount=views.layout.render(user_menu_info, is_auto_login=bool(session.get("is_auto_login"))),
+                     redirect_container=None,
+                     current_pathname=pathname,
+                     router_list=menu_info,
++                    token=no_update,
+                             )
+ 
+             else:
+@@ -79,6 +83,7 @@ def router(pathname, url_trigger, session_token):
+                     redirect_container=None,
+                     current_pathname=pathname,
+                     router_list=no_update,
++                    token=no_update,
+                             )
+ 
+         else:
+@@ -88,8 +93,53 @@ def router(pathname, url_trigger, session_token):
+                 redirect_container=None,
+                 current_pathname=no_update,
+                 router_list=no_update,
++                token=no_update,
+                     )
+ 
++    # auto-login 场景：server session 有 token，但前端 dcc.Store 还是空的（页面首次加载）
++    # 把 server session 的 token 同步到前端，让后续 callback 能正常工作
++    elif token_result and not session_token and url_trigger == 'load':
++        logger.info(
++            '[router] 检测到 auto-login 场景，同步 server session token 到前端 dcc.Store'
++        )
++        current_user = LoginApi.get_info()
++        router_list_result = RouterApi.get_routers()
++        router_list = router_list_result['data']
++        router_list = RouterConfig.CONSTANT_ROUTES + router_list
++        menu_info = RouterUtil.generate_menu_tree(router_list)
++        permissions = {
++            'perms': current_user['permissions'],
++            'roles': current_user['roles'],
++        }
++        cache_obj = dict(
++            user_info=current_user['user'],
++            permissions=permissions,
++            menu_info=menu_info,
++        )
++        CacheManager.set(cache_obj)
++        valid_pathname_list = RouterUtil.generate_validate_pathname_list(
++            menu_info
++        )
++        if pathname in valid_pathname_list:
++            user_menu_info = RouterUtil.generate_menu_tree(
++                RouterUtil.get_visible_routers(router_list)
++            )
++            return dict(
++                app_mount=views.layout.render(user_menu_info, is_auto_login=bool(session.get("is_auto_login"))),
++                redirect_container=None,
++                current_pathname=pathname,
++                router_list=menu_info,
++                token=token_result,  # 同步 server session token 到前端
++            )
++        else:
++            return dict(
++                app_mount=views.page_404.render(),
++                redirect_container=None,
++                current_pathname=no_update,
++                router_list=no_update,
++                token=token_result,  # 即使404也同步 token
++            )
++
+     else:
+         # 若未登录
+         # 根据pathname控制渲染行为
+@@ -102,6 +152,7 @@ def router(pathname, url_trigger, session_token):
+                     redirect_container=None,
+                     current_pathname=no_update,
+                     router_list=no_update,
++                    token=no_update,
+                             )
+ 
+         # 否则重定向到登录页
+@@ -112,4 +163,5 @@ def router(pathname, url_trigger, session_token):
+             ),
+             current_pathname=no_update,
+             router_list=no_update,
+-            )
++            token=no_update,
++        )
+

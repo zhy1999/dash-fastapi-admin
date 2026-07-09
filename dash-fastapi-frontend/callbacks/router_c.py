@@ -1,0 +1,184 @@
+from dash import dcc, no_update
+from dash.dependencies import Input, Output, State
+from flask import session
+from importlib import import_module
+import views
+from api.login import LoginApi
+from api.router import RouterApi
+from config.router import RouterConfig
+from server import app
+from utils.cache_util import CacheManager
+from utils.log_util import logger
+from utils.router_util import RouterUtil
+
+
+@app.callback(
+    output=dict(
+        app_mount=Output('app-mount', 'children'),
+        redirect_container=Output(
+            'redirect-container', 'children', allow_duplicate=True
+        ),
+        current_pathname=Output('current-pathname-container', 'data'),
+        router_list=Output('router-list-container', 'data'),
+        # 新增：auto-login 场景下同步 server session 的 token 到前端 dcc.Store
+        token=Output('token-container', 'data', allow_duplicate=True),
+    ),
+    inputs=dict(pathname=Input('url-container', 'pathname')),
+    state=dict(
+        url_trigger=State('url-container', 'trigger'),
+        session_token=State('token-container', 'data'),
+    ),
+    prevent_initial_call='initial_duplicate',  # === 2026-06-29 修 auto-login 初始 pathname 不触发 callback 的 bug ===
+)
+def router(pathname, url_trigger, session_token):
+    """
+    全局路由回调
+    """
+    # 检查当前会话是否已经登录
+    token_result = session.get('Authorization')
+    # === 2026-06-29 重构：按 token 一致性分流 ===
+    # 分支 A：server 和前端 token 一致 → 已登录正常流程
+    # 分支 B：server 有 token 但前端不一致（空 / 旧 / 重新登录后） → auto-login 同步
+    # 分支 C：server 没 token → 未登录
+    if token_result and session_token and token_result == session_token:
+        # === 2026-06-29 修复：根路径 / 默认重定向到第一个菜单，避免显示 404 ===
+        if pathname in ('/', ''):
+            logger.info('[router] 根路径跳转默认页 /system/user')
+            return dict(
+                app_mount=no_update,
+                redirect_container=dcc.Location(
+                    pathname='/system/user', id='router-redirect'
+                ),
+                current_pathname=no_update,
+                router_list=no_update,
+                token=no_update,
+            )
+        # === 2026-06-29 修复：cache 为空时强制刷新（auto-login 场景 cache 是空，启动后第一次访问会 None）===
+        cached_menu_info = CacheManager.get('menu_info')
+        if url_trigger == 'load' or not cached_menu_info:
+            current_user = LoginApi.get_info()
+            router_list_result = RouterApi.get_routers()
+            router_list = router_list_result['data']
+            router_list = RouterConfig.CONSTANT_ROUTES + router_list
+            menu_info = RouterUtil.generate_menu_tree(router_list)
+            permissions = {
+                'perms': current_user['permissions'],
+                'roles': current_user['roles'],
+            }
+            cache_obj = dict(
+                user_info=current_user['user'],
+                permissions=permissions,
+                menu_info=menu_info,
+            )
+            CacheManager.set(cache_obj)
+        menu_info = CacheManager.get('menu_info')
+        valid_pathname_list = RouterUtil.generate_validate_pathname_list(
+            menu_info
+        )
+        if pathname in valid_pathname_list:
+            if url_trigger == 'load':
+                # 登录页等白名单路由直接渲染，不重定向
+
+                user_menu_info = RouterUtil.generate_menu_tree(
+                    RouterUtil.get_visible_routers(router_list)
+                )
+                search_panel_data = RouterUtil.generate_search_panel_data(
+                    user_menu_info
+                )
+                # 否则正常渲染主页面
+                return dict(
+                    app_mount=views.layout.render(user_menu_info, is_auto_login=bool(session.get("is_auto_login"))),
+                    redirect_container=None,
+                    current_pathname=pathname,
+                    router_list=menu_info,
+                    token=no_update,
+                            )
+
+            else:
+                return dict(
+                    app_mount=no_update,
+                    redirect_container=None,
+                    current_pathname=pathname,
+                    router_list=no_update,
+                    token=no_update,
+                            )
+
+        else:
+            # 渲染404状态页
+            return dict(
+                app_mount=views.page_404.render(),
+                redirect_container=None,
+                current_pathname=no_update,
+                router_list=no_update,
+                token=no_update,
+                    )
+
+    # auto-login / 重新登录 场景：server session 有 token，但前端 dcc.Store 与之不一致
+    # 把 server session 的 token 同步到前端，覆盖前端的旧值
+    elif token_result and token_result != session_token:
+        logger.info(
+            '[router] 检测到 auto-login 场景，同步 server session token 到前端 dcc.Store'
+        )
+        current_user = LoginApi.get_info()
+        router_list_result = RouterApi.get_routers()
+        router_list = router_list_result['data']
+        router_list = RouterConfig.CONSTANT_ROUTES + router_list
+        menu_info = RouterUtil.generate_menu_tree(router_list)
+        permissions = {
+            'perms': current_user['permissions'],
+            'roles': current_user['roles'],
+        }
+        cache_obj = dict(
+            user_info=current_user['user'],
+            permissions=permissions,
+            menu_info=menu_info,
+        )
+        CacheManager.set(cache_obj)
+        valid_pathname_list = RouterUtil.generate_validate_pathname_list(
+            menu_info
+        )
+        if pathname in valid_pathname_list:
+            user_menu_info = RouterUtil.generate_menu_tree(
+                RouterUtil.get_visible_routers(router_list)
+            )
+            return dict(
+                app_mount=views.layout.render(user_menu_info, is_auto_login=bool(session.get("is_auto_login"))),
+                redirect_container=None,
+                current_pathname=pathname,
+                router_list=menu_info,
+                token=token_result,  # 同步 server session token 到前端
+            )
+        else:
+            return dict(
+                app_mount=views.page_404.render(),
+                redirect_container=None,
+                current_pathname=no_update,
+                router_list=no_update,
+                token=token_result,  # 即使404也同步 token
+            )
+
+    else:
+        # 若未登录
+        # 根据pathname控制渲染行为
+        for route in RouterConfig.WHITE_ROUTES_LIST:
+            if pathname == route.get('path'):
+                component = route.get('component') or 'page_404'
+
+                return dict(
+                    app_mount=import_module('views.' + component).render(),
+                    redirect_container=None,
+                    current_pathname=no_update,
+                    router_list=no_update,
+                    token=no_update,
+                            )
+
+        # 否则重定向到登录页
+        return dict(
+            app_mount=no_update,
+            redirect_container=dcc.Location(
+                pathname='/login', id='router-redirect'
+            ),
+            current_pathname=no_update,
+            router_list=no_update,
+            token=no_update,
+        )

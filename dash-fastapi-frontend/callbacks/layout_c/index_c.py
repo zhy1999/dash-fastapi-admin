@@ -1,0 +1,393 @@
+import dash
+import feffery_antd_components as fac
+from dash import ctx, dcc, html, no_update
+from dash.dependencies import Input, Output, State
+from dash.exceptions import PreventUpdate
+from importlib import import_module
+from jsonpath_ng import parse
+import views  # noqa: F401
+from server import app
+from utils.router_util import RouterUtil
+
+
+def build_breadcrumb(currentItem, currentItemPath):
+    """
+    根据 currentItem 和 currentItemPath 动态构建面包屑（不含首页，无重复）
+    currentItemPath: 祖先节点列表（不含当前节点）
+    currentItem: 当前选中节点
+    """
+    seen = set()
+    items = []
+    # 先加父级路径（去重）
+    if currentItemPath:
+        for parent in currentItemPath:
+            props = parent.get('props', {})
+            key = props.get('key')
+            title = props.get('title', '')
+            if title and key and key not in seen:
+                seen.add(key)
+                items.append({'title': title, 'icon': props.get('icon')})
+    # 再加当前节点（去重）
+    if currentItem:
+        props = currentItem.get('props', {})
+        key = props.get('key')
+        title = props.get('title', '')
+        if title and key and key not in seen:
+            seen.add(key)
+            items.append({'title': title, 'icon': props.get('icon')})
+    return items
+
+
+@app.callback(
+    [
+        Output('tabs-container', 'items', allow_duplicate=True),
+        Output('tabs-container', 'activeKey', allow_duplicate=True),
+        Output('header-breadcrumb', 'items', allow_duplicate=True),
+        Output('index-side-menu', 'openKeys', allow_duplicate=True),
+    ],
+    [
+        Input('index-side-menu', 'currentKey'),
+        Input('tabs-container', 'tabCloseCounts'),
+    ],
+    [
+        State('current-key_path-store', 'data'),
+        State('current-item-store', 'data'),
+        State('current-item_path-store', 'data'),
+        State('tabs-container', 'latestDeletePane'),
+        State('tabs-container', 'items'),
+        State('tabs-container', 'activeKey'),
+    ],
+    prevent_initial_call=True,
+)
+def handle_tab_switch_and_create(
+    currentKey,
+    tabCloseCounts,
+    currentKeyPath,
+    currentItem,
+    currentItemPath,
+    latestDeletePane,
+    origin_items,
+    activeKey,
+):
+    """
+    处理标签页新建、切换、删除
+    面包屑随菜单切换同步更新（不含首页）
+    """
+    trigger_id = dash.ctx.triggered_id
+
+    # 重置 nClicks 避免误触发
+    parser = parse('$..nClicks')
+    origin_items = parser.update(origin_items, None)
+    new_items = dash.Patch()
+
+    if trigger_id == 'index-side-menu':
+        breadcrumb_items = build_breadcrumb(currentItem, currentItemPath)
+
+        # 统一 tab key：优先 href（pathname），避免 init_first_tab 与这里格式不一致
+        menu_href = (currentItem.get('props', {}) or {}).get('href') or ''
+        if menu_href and not menu_href.startswith('/'):
+            menu_href = '/' + menu_href
+        tab_key = menu_href or currentKey
+
+        # lenient 匹配：标准化 key 格式后比较（处理 '/system/user' vs 'system/user' vs 'User/system/user' 等差异）
+        def _normalize_key(k):
+            if not k:
+                return ''
+            k = k.lstrip('/')
+            parts = k.split('/')
+            if parts and parts[0] == 'User' and len(parts) > 1:
+                k = '/'.join(parts[1:])
+            return k
+
+        def _tab_exists(items, target_key):
+            target_norm = _normalize_key(target_key)
+            for it in items:
+                k = it.get('key', '') or ''
+                if k == target_key:
+                    return True
+                if _normalize_key(k) == target_norm:
+                    return True
+            return False
+
+        if _tab_exists(origin_items, tab_key):
+            return [dash.no_update, tab_key, breadcrumb_items, currentKeyPath or []]
+
+        menu_title = currentItem.get('props', {}).get('title', '未命名')
+        menu_modules = currentItem.get('props', {}).get('modules')
+
+        # 为已有 tab 追加"关闭右侧"菜单项
+        for index, item in enumerate(origin_items):
+            if {'key': '关闭右侧', 'label': '关闭右侧', 'icon': 'antd-arrow-right'} not in item['contextMenu']:
+                item['contextMenu'].insert(-1, {
+                    'key': '关闭右侧', 'label': '关闭右侧', 'icon': 'antd-arrow-right',
+                })
+            new_items[index]['contextMenu'] = item['contextMenu']
+
+        context_menu = [
+            {'key': '刷新页面', 'label': '刷新页面', 'icon': 'antd-reload'},
+            {'key': '关闭当前', 'label': '关闭当前', 'icon': 'antd-close'},
+            {'key': '关闭其他', 'label': '关闭其他', 'icon': 'antd-close-circle'},
+            {'key': '全部关闭', 'label': '全部关闭', 'icon': 'antd-close-circle'},
+        ]
+        if len(origin_items) != 1:
+            context_menu.insert(-1, {
+                'key': '关闭左侧', 'label': '关闭左侧', 'icon': 'antd-arrow-left',
+            })
+
+        # 跳过外部链接
+        if RouterUtil.is_http(currentItem.get('path', '')):
+            raise PreventUpdate
+
+        if menu_modules:
+            new_items.append({
+                'label': menu_title,
+                'key': tab_key,
+                'closable': currentItem.get('props', {}).get('affix', False) != True,
+                'children': import_module('views.' + menu_modules).render(),
+                'contextMenu': context_menu,
+            })
+        else:
+            new_items.append({
+                'label': menu_title,
+                'key': tab_key,
+                'children': fac.AntdResult(
+                    status='404', title='页面不存在', subTitle='请先配置该路由的页面',
+                    style={'paddingBottom': 0, 'paddingTop': 0},
+                ),
+                'contextMenu': context_menu,
+            })
+
+        return [new_items, tab_key, breadcrumb_items, currentKeyPath or []]
+
+    elif trigger_id == 'tabs-container':
+        # 删除指定 tab
+        delete_index = None
+        for index, item in enumerate(origin_items):
+            if item['key'] == latestDeletePane:
+                delete_index = index
+                break
+        if delete_index is None:
+            raise PreventUpdate
+        del new_items[delete_index]
+
+        remaining = [item for item in origin_items if item['key'] != latestDeletePane]
+        if not remaining:
+            raise PreventUpdate
+        new_active = remaining[-1]['key'] if activeKey == latestDeletePane else activeKey
+        return [new_items, new_active, dash.no_update, dash.no_update]
+
+    raise PreventUpdate
+
+
+# 处理侧边菜单栏自动滚动到当前菜单项位置
+app.clientside_callback(
+    """
+    (pathname) => {
+        setTimeout(() => {
+            let scrollTarget = document.getElementsByName(pathname);
+            if (scrollTarget.length > 0) {
+                scrollTarget[0].scrollIntoView({ behavior: "smooth" });
+            }
+        }, 1000);
+    }
+    """,
+    Input('url-container', 'pathname'),
+)
+
+
+@app.callback(
+    [
+        Output('tabs-container', 'items', allow_duplicate=True),
+        Output('tabs-container', 'activeKey', allow_duplicate=True),
+        Output('trigger-reload-output', 'reload', allow_duplicate=True),
+    ],
+    Input('tabs-container', 'clickedContextMenu'),
+    [State('tabs-container', 'items'), State('tabs-container', 'activeKey')],
+    prevent_initial_call=True,
+)
+def handle_via_context_menu(clickedContextMenu, origin_items, activeKey):
+    """基于标签页右键菜单控制标签页"""
+    if clickedContextMenu['menuKey'] == '刷新页面':
+        return [dash.no_update, dash.no_update, True]
+
+    new_items = dash.Patch()
+    if '关闭' in clickedContextMenu['menuKey']:
+        if clickedContextMenu['menuKey'] == '关闭当前':
+            for index, item in enumerate(origin_items):
+                if item['key'] == clickedContextMenu['tabKey']:
+                    context_menu = [
+                        {'key': '刷新页面', 'label': '刷新页面', 'icon': 'antd-reload'},
+                        {'key': '关闭其他', 'label': '关闭其他', 'icon': 'antd-close-circle'},
+                        {'key': '全部关闭', 'label': '全部关闭', 'icon': 'antd-close-circle'},
+                    ]
+                    if index == 1:
+                        if len(origin_items) == 2:
+                            new_items[0]['contextMenu'] = context_menu
+                        else:
+                            origin_items[2]['contextMenu'].remove(
+                                {'key': '关闭左侧', 'label': '关闭左侧', 'icon': 'antd-arrow-left'})
+                            new_items[2]['contextMenu'] = origin_items[2]['contextMenu']
+                    elif index == 2:
+                        if len(origin_items) == 3:
+                            origin_items[1]['contextMenu'].remove(
+                                {'key': '关闭右侧', 'label': '关闭右侧', 'icon': 'antd-arrow-right'})
+                            new_items[1]['contextMenu'] = origin_items[1]['contextMenu']
+                    else:
+                        if index == len(origin_items) - 1:
+                            new_items[index - 1]['contextMenu'] = item['contextMenu']
+                    del new_items[index]
+                    break
+
+            new_origin_items = [item for item in origin_items if item['key'] != clickedContextMenu['tabKey']]
+            return [new_items, new_origin_items[-1]['key'] if activeKey == clickedContextMenu['tabKey'] else activeKey, dash.no_update]
+
+        elif clickedContextMenu['menuKey'] == '关闭其他':
+            current_index = 0
+            for index, item in enumerate(origin_items):
+                if item['key'] == clickedContextMenu['tabKey']:
+                    current_index = index
+            # 倒序删除（先删右侧，再删左侧），避免索引前移
+            for i in range(len(origin_items) - 1, current_index, -1):
+                del new_items[i]
+            for i in range(current_index - 1, 0, -1):
+                del new_items[i]
+            context_menu = [
+                {'key': '刷新页面', 'label': '刷新页面', 'icon': 'antd-reload'},
+                {'key': '关闭其他', 'label': '关闭其他', 'icon': 'antd-close-circle'},
+                {'key': '全部关闭', 'label': '全部关闭', 'icon': 'antd-close-circle'},
+            ]
+            context_menu.insert(1, {'key': '关闭当前', 'label': '关闭当前', 'icon': 'antd-close'})
+            new_items[current_index]['contextMenu'] = context_menu
+            return [new_items, clickedContextMenu['tabKey'], dash.no_update]
+
+        elif clickedContextMenu['menuKey'] == '关闭左侧':
+            current_index = 0
+            for index, item in enumerate(origin_items):
+                if item['key'] == clickedContextMenu['tabKey']:
+                    current_index = index
+                    item['contextMenu'].remove({'key': '关闭左侧', 'label': '关闭左侧', 'icon': 'antd-arrow-left'})
+                    new_items[index]['contextMenu'] = item['contextMenu']
+                    break
+            # 倒序删除，避免索引前移后越界
+            for i in range(current_index - 1, 0, -1):
+                del new_items[i]
+            return [new_items, clickedContextMenu['tabKey'], dash.no_update]
+
+        elif clickedContextMenu['menuKey'] == '关闭右侧':
+            current_index = 0
+            for index, item in enumerate(origin_items):
+                if item['key'] == clickedContextMenu['tabKey']:
+                    current_index = index
+                    item['contextMenu'].remove({'key': '关闭右侧', 'label': '关闭右侧', 'icon': 'antd-arrow-right'})
+                    new_items[index]['contextMenu'] = item['contextMenu']
+                    break
+            # 倒序删除，避免索引前移后越界
+            for i in range(len(origin_items) - 1, current_index, -1):
+                del new_items[i]
+            return [new_items, clickedContextMenu['tabKey'], dash.no_update]
+
+        # 全部关闭：保留最后一个 tab
+        for i in range(len(origin_items) - 1, 0, -1):
+            del new_items[i]
+        new_items[0]['contextMenu'] = [
+            {'key': '刷新页面', 'label': '刷新页面', 'icon': 'antd-reload'},
+            {'key': '关闭其他', 'label': '关闭其他', 'icon': 'antd-close-circle'},
+            {'key': '全部关闭', 'label': '全部关闭', 'icon': 'antd-close-circle'},
+        ]
+        return [new_items, origin_items[-1]['key'], dash.no_update]
+
+    raise PreventUpdate
+
+
+# 标签页点击 → 路由切换
+app.clientside_callback(
+    """
+    (activeKey, routerList) => {
+        if (activeKey) {
+            let currentItem = findByKey(routerList, activeKey);
+            return currentItem?.props?.href;
+        }
+        throw window.dash_clientside.PreventUpdate;
+    }
+    """,
+    Output('dcc-url', 'pathname', allow_duplicate=True),
+    Input('tabs-container', 'activeKey'),
+    State('router-list-container', 'data'),
+    prevent_initial_call=True,
+)
+
+
+# ── 首次加载时自动初始化第一个 tab（解决 tabs 初始为空的问题） ──
+@app.callback(
+    [
+        Output('tabs-container', 'items', allow_duplicate=True),
+        Output('tabs-container', 'activeKey', allow_duplicate=True),
+        Output('header-breadcrumb', 'items', allow_duplicate=True),
+        Output('index-side-menu', 'openKeys', allow_duplicate=True),
+    ],
+    Input('current-pathname-container', 'data'),
+    [
+        State('current-key_path-store', 'data'),
+        State('current-item-store', 'data'),
+        State('current-item_path-store', 'data'),
+        State('tabs-container', 'items'),
+        State('tabs-container', 'activeKey'),
+        State('router-list-container', 'data'),
+    ],
+    prevent_initial_call=True,
+)
+def init_first_tab(
+    pathname,
+    currentKeyPath,
+    currentItem,
+    currentItemPath,
+    origin_items,
+    activeKey,
+    router_list,
+):
+    """
+    当用户登录后首次加载有效路由、或刷新页面时，
+    若 tabs 为空（首次加载），自动创建第一个 tab 并设置面包屑
+    """
+    # 只在 tabs 为空时初始化（避免每次 pathname 变化都重复创建）
+    if origin_items:
+        raise PreventUpdate
+
+    if not currentItem or not router_list:
+        raise PreventUpdate
+
+    breadcrumb_items = build_breadcrumb(currentItem, currentItemPath)
+    menu_title = currentItem.get('props', {}).get('title', '未命名')
+    menu_modules = currentItem.get('props', {}).get('modules')
+    # 统一用 href 作为 tab key（与 handle_tab_switch_and_create 一致，避免重复创建）
+    menu_href = (currentItem.get('props', {}) or {}).get('href') or ''
+    if menu_href and not menu_href.startswith('/'):
+        menu_href = '/' + menu_href
+    currentKey = menu_href or currentItem.get('props', {}).get('key')
+
+    context_menu = [
+        {'key': '刷新页面', 'label': '刷新页面', 'icon': 'antd-reload'},
+        {'key': '关闭其他', 'label': '关闭其他', 'icon': 'antd-close-circle'},
+        {'key': '全部关闭', 'label': '全部关闭', 'icon': 'antd-close-circle'},
+    ]
+
+    if RouterUtil.is_http(currentItem.get('path', '')):
+        raise PreventUpdate
+
+    if menu_modules:
+        children = import_module('views.' + menu_modules).render()
+    else:
+        children = fac.AntdResult(
+            status='404', title='页面不存在', subTitle='请先配置该路由的页面',
+            style={'paddingBottom': 0, 'paddingTop': 0},
+        ).render()
+
+    first_tab = [{
+        'label': menu_title,
+        'key': currentKey,
+        'closable': currentItem.get('props', {}).get('affix', False) != True,
+        'children': children,
+        'contextMenu': context_menu,
+    }]
+
+    return [first_tab, currentKey, breadcrumb_items, currentKeyPath or []]

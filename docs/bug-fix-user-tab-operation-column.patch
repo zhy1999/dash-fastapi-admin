@@ -1,0 +1,62 @@
+diff --git a/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py b/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py
+index b51f08e..49c8961 100644
+--- a/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py
++++ b/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py
+@@ -932,36 +932,26 @@ def reset_user_export_status(data):
+     raise PreventUpdate
+ 
+ 
+-@app.callback(
+-    [
+-        Output('user-list-table', 'columns', allow_duplicate=True),
+-    ],
+-    [
+-        Input('user-operations-store', 'data'),
+-        Input('url-container', 'pathname'),
+-    ],
+-    [
+-        State('user-operations-store', 'data'),
+-        State('url-container', 'pathname'),
+-    ],
++# 动态控制操作列的显示/隐藏（无操作权限时隐藏）
++# 使用 clientside callback，只在 user-operations-store 数据变化时触发，避免 Tab 切换时误触发
++app.clientside_callback(
++    """
++    (operations_data) => {
++        // 如果 store 有数据且包含 menuItems，说明有操作权限，不隐藏
++        if (operations_data && operations_data.menuItems) {
++            throw window.dash_clientside.PreventUpdate;
++        }
++        // 无操作权限，隐藏操作列
++        return [[{
++            title: '操作',
++            dataIndex: 'operation',
++            fixed: 'right',
++            width: 120,
++            hidden: true,
++        }]];
++    }
++    """,
++    Output('user-list-table', 'columns', allow_duplicate=True),
++    Input('user-operations-store', 'data'),
+     prevent_initial_call=True,
+ )
+-def update_operation_column_visibility(operations_data, pathname, operations_state, pathname_state):
+-    """
+-    动态控制操作列的显示/隐藏
+-    当 operations 为空时隐藏操作列
+-    有操作权限时不更新（保持原状）
+-    """
+-    # 有操作权限，不更新
+-    if operations_data and operations_data.get('menuItems'):
+-        raise PreventUpdate
+-    # 无操作权限，隐藏操作列
+-    return [[
+-        {
+-            'title': '操作',
+-            'dataIndex': 'operation',
+-            'fixed': 'right',
+-            'width': 120,
+-            'hidden': True,
+-        }
+-    ]]

@@ -1,0 +1,323 @@
+diff --git a/dash-fastapi-frontend/auto_login.py b/dash-fastapi-frontend/auto_login.py
+new file mode 100644
+index 0000000..148c644
+--- /dev/null
++++ b/dash-fastapi-frontend/auto_login.py
+@@ -0,0 +1,126 @@
++"""
++嵌入式自动登录端点
++
++URL 形式：
++  GET /auto-login?username=xxx&password=yyy&redirect=/system/user
++  GET /auto-login?token=xxx&redirect=/system/user
++
++⚠️ 安全提示：
++  - 这是免登录端点，等于把用户名密码写在 URL 里
++  - 仅用于内部网络 / 受信任的嵌入式嵌入场景
++  - 生产环境建议加白名单 IP / HMAC 签名 / 一次性 token 二次确认
++  - redirect 路径必须在白名单内（防 open redirect）
++
++调用示例：
++  http://10.208.11.16:38039/auto-login?username=admin&password=admin123&redirect=/system/user
++"""
++from urllib.parse import urlparse
++
++from flask import redirect, request, session
++
++from api.login import LoginApi
++from config.exception import (
++    AuthException,
++    RequestException,
++    ServiceException,
++    ServiceWarning,
++)
++from server import server
++from utils.log_util import logger
++
++
++# 允许自动跳转的白名单路径前缀（防 open redirect）
++ALLOWED_REDIRECT_PREFIXES = (
++    '/system/',
++    '/monitor/',
++    '/tool/',
++    '/',
++)
++
++
++def _safe_redirect(path):
++    """
++    校验 redirect 路径是否合法
++    - 必须以 / 开头（相对路径）
++    - 拒绝 //evil.com、http://、https:// 等外部跳转
++    - 必须以白名单前缀开头
++    """
++    if not path or not isinstance(path, str):
++        return '/system/user'
++    parsed = urlparse(path)
++    # 拒绝带 scheme 或 netloc 的 URL（防 open redirect）
++    if parsed.scheme or parsed.netloc:
++        return '/system/user'
++    # 必须以白名单前缀开头
++    if not any(path.startswith(p) for p in ALLOWED_REDIRECT_PREFIXES):
++        return '/system/user'
++    return path
++
++
++def _login_error_redirect(msg):
++    """统一错误跳转"""
++    from urllib.parse import quote
++    return redirect('/login?error=' + quote(str(msg or '登录失败')))
++
++
++@server.route('/auto-login', methods=['GET'])
++def auto_login():
++    """
++    嵌入式自动登录路由
++    """
++    username = request.args.get('username')
++    password = request.args.get('password')
++    token = request.args.get('token')
++    redirect_path = _safe_redirect(
++        request.args.get('redirect', '/system/user')
++    )
++
++    try:
++        if token:
++            # 已有 token，直接 set session
++            session['Authorization'] = token
++            logger.info(
++                '[auto-login] token 方式登录, redirect={}', redirect_path
++            )
++        elif username and password:
++            # 用用户名密码调后端登录拿 token
++            try:
++                result = LoginApi.login(
++                    dict(username=username, password=password)
++                )
++            except AuthException as e:
++                return _login_error_redirect(
++                    e.message or '认证失败，token 无效或过期'
++                )
++            except ServiceException as e:
++                # 后端业务错误（密码错、账号不存在、账号锁定等）
++                return _login_error_redirect(
++                    e.message or '登录失败，请检查用户名密码'
++                )
++            except ServiceWarning as e:
++                return _login_error_redirect(e.message or '登录警告')
++            except RequestException as e:
++                return _login_error_redirect(
++                    e.message or '请求异常，请稍后重试'
++                )
++
++            # 拿到 token
++            if isinstance(result, dict):
++                token = result.get('token')
++                if not token:
++                    return _login_error_redirect('登录失败：未拿到 token')
++                session['Authorization'] = token
++                logger.info(
++                    '[auto-login] 用户 {} 登录成功, redirect={}',
++                    username,
++                    redirect_path,
++                )
++            else:
++                return _login_error_redirect('登录失败：响应格式异常')
++        else:
++            return _login_error_redirect('缺少 username/password 或 token 参数')
++    except Exception as e:
++        logger.error('[auto-login] 未捕获异常: {}', str(e))
++        return _login_error_redirect('登录异常，请联系管理员')
++
++    return redirect(redirect_path)
+diff --git a/dash-fastapi-frontend/callbacks/router_c.py b/dash-fastapi-frontend/callbacks/router_c.py
+index b5119ac..d191aea 100644
+--- a/dash-fastapi-frontend/callbacks/router_c.py
++++ b/dash-fastapi-frontend/callbacks/router_c.py
+@@ -8,6 +8,7 @@ from api.router import RouterApi
+ from config.router import RouterConfig
+ from server import app
+ from utils.cache_util import CacheManager
++from utils.log_util import logger
+ from utils.router_util import RouterUtil
+ 
+ 
+@@ -19,6 +20,8 @@ from utils.router_util import RouterUtil
+         ),
+         current_pathname=Output('current-pathname-container', 'data'),
+         router_list=Output('router-list-container', 'data'),
++        # 新增：auto-login 场景下同步 server session 的 token 到前端 dcc.Store
++        token=Output('token-container', 'data', allow_duplicate=True),
+     ),
+     inputs=dict(pathname=Input('url-container', 'pathname')),
+     state=dict(
+@@ -71,6 +74,7 @@ def router(pathname, url_trigger, session_token):
+                     redirect_container=None,
+                     current_pathname=pathname,
+                     router_list=menu_info,
++                    token=no_update,
+                             )
+ 
+             else:
+@@ -79,6 +83,7 @@ def router(pathname, url_trigger, session_token):
+                     redirect_container=None,
+                     current_pathname=pathname,
+                     router_list=no_update,
++                    token=no_update,
+                             )
+ 
+         else:
+@@ -88,8 +93,53 @@ def router(pathname, url_trigger, session_token):
+                 redirect_container=None,
+                 current_pathname=no_update,
+                 router_list=no_update,
++                token=no_update,
+                     )
+ 
++    # auto-login 场景：server session 有 token，但前端 dcc.Store 还是空的（页面首次加载）
++    # 把 server session 的 token 同步到前端，让后续 callback 能正常工作
++    elif token_result and not session_token and url_trigger == 'load':
++        logger.info(
++            '[router] 检测到 auto-login 场景，同步 server session token 到前端 dcc.Store'
++        )
++        current_user = LoginApi.get_info()
++        router_list_result = RouterApi.get_routers()
++        router_list = router_list_result['data']
++        router_list = RouterConfig.CONSTANT_ROUTES + router_list
++        menu_info = RouterUtil.generate_menu_tree(router_list)
++        permissions = {
++            'perms': current_user['permissions'],
++            'roles': current_user['roles'],
++        }
++        cache_obj = dict(
++            user_info=current_user['user'],
++            permissions=permissions,
++            menu_info=menu_info,
++        )
++        CacheManager.set(cache_obj)
++        valid_pathname_list = RouterUtil.generate_validate_pathname_list(
++            menu_info
++        )
++        if pathname in valid_pathname_list:
++            user_menu_info = RouterUtil.generate_menu_tree(
++                RouterUtil.get_visible_routers(router_list)
++            )
++            return dict(
++                app_mount=views.layout.render(user_menu_info),
++                redirect_container=None,
++                current_pathname=pathname,
++                router_list=menu_info,
++                token=token_result,  # 同步 server session token 到前端
++            )
++        else:
++            return dict(
++                app_mount=views.page_404.render(),
++                redirect_container=None,
++                current_pathname=no_update,
++                router_list=no_update,
++                token=token_result,  # 即使404也同步 token
++            )
++
+     else:
+         # 若未登录
+         # 根据pathname控制渲染行为
+@@ -102,6 +152,7 @@ def router(pathname, url_trigger, session_token):
+                     redirect_container=None,
+                     current_pathname=no_update,
+                     router_list=no_update,
++                    token=no_update,
+                             )
+ 
+         # 否则重定向到登录页
+@@ -112,4 +163,5 @@ def router(pathname, url_trigger, session_token):
+             ),
+             current_pathname=no_update,
+             router_list=no_update,
+-            )
++            token=no_update,
++        )
+diff --git a/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py b/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py
+index b51f08e..80c7bac 100644
+--- a/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py
++++ b/dash-fastapi-frontend/callbacks/system_c/user_c/user_c.py
+@@ -932,36 +932,41 @@ def reset_user_export_status(data):
+     raise PreventUpdate
+ 
+ 
++# 动态控制操作列的显示/隐藏（无操作权限时隐藏）
++# 服务端 callback：根据当前用户真实权限判断
++# - 有任一 system:user:* 操作权限 -> PreventUpdate，保持原 columns（不修改任何列）
++# - 无操作权限 -> 把"操作"列 hidden=True，其他列不变
++# 关键修复：之前的 clientside_callback 检查的是 operations_data.menuItems（没人设置过），
++#           且返回值是"只含一列"的 columns 数组，会覆盖清空其他所有列，
++#           导致任何写 store 的操作（新增/编辑/删除/重置密码/状态切换/导入）后列头消失。
+ @app.callback(
+-    [
+-        Output('user-list-table', 'columns', allow_duplicate=True),
+-    ],
+-    [
+-        Input('user-operations-store', 'data'),
+-        Input('url-container', 'pathname'),
+-    ],
+-    [
+-        State('user-operations-store', 'data'),
+-        State('url-container', 'pathname'),
+-    ],
++    output=Output('user-list-table', 'columns', allow_duplicate=True),
++    inputs=dict(
++        data=Input('user-list-table', 'data'),
++        operations=Input('user-operations-store', 'data'),
++    ),
++    state=dict(
++        current_columns=State('user-list-table', 'columns'),
++    ),
+     prevent_initial_call=True,
+ )
+-def update_operation_column_visibility(operations_data, pathname, operations_state, pathname_state):
++def update_user_list_columns_by_permission(data, operations, current_columns):
+     """
+-    动态控制操作列的显示/隐藏
+-    当 operations 为空时隐藏操作列
+-    有操作权限时不更新（保持原状）
++    根据当前用户权限动态控制"操作"列的显示/隐藏
+     """
+-    # 有操作权限，不更新
+-    if operations_data and operations_data.get('menuItems'):
++    if not current_columns:
+         raise PreventUpdate
+-    # 无操作权限，隐藏操作列
+-    return [[
+-        {
+-            'title': '操作',
+-            'dataIndex': 'operation',
+-            'fixed': 'right',
+-            'width': 120,
+-            'hidden': True,
+-        }
+-    ]]
++    has_perm = any(
++        PermissionManager.check_perms(f'system:user:{op}')
++        for op in ['edit', 'remove', 'resetPwd']
++    )
++    if has_perm:
++        raise PreventUpdate
++    # 无操作权限：把操作列 hidden=True，其他列不变
++    new_columns = []
++    for col in current_columns:
++        col_copy = dict(col)
++        if col_copy.get('dataIndex') == 'operation':
++            col_copy['hidden'] = True
++        new_columns.append(col_copy)
++    return new_columns
+diff --git a/dash-fastapi-frontend/server.py b/dash-fastapi-frontend/server.py
+index e1bca53..c29c87b 100644
+--- a/dash-fastapi-frontend/server.py
++++ b/dash-fastapi-frontend/server.py
+@@ -67,3 +67,7 @@ def get_user_agent_info():
+ #                 session.get('name'), request.remote_addr, request.method, request.data.decode("utf-8"))
+ #
+ #     return response
++
++
++# 注册嵌入式自动登录路由（导入即注册）
++import auto_login  # noqa: E402, F401
